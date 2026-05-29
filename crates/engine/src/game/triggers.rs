@@ -15682,6 +15682,79 @@ mod dedup_regression_tests {
         );
     }
 
+    /// Issue #1367 (cluster #1384) — RUNTIME PIPELINE TEST.
+    /// CR 119.3 + CR 603.4 + CR 102.1: Valgavoth, Harrower of Souls — "Whenever
+    /// an opponent loses life for the first time during each of their turns,
+    /// ...". Drives the real
+    /// parser output through the runtime evaluators: the "during each of their
+    /// turns" timing becomes a `DuringPlayersTurn { TriggeringPlayer }`
+    /// intervening-if (gated against the life-loser via the `LifeChanged` event),
+    /// and "for the first time" becomes a `OncePerTurn` constraint. Previously
+    /// both were dropped, so the trigger fired on every opponent life-loss.
+    #[test]
+    fn issue_1367_valgavoth_first_time_during_their_turn_gates_at_runtime() {
+        use crate::types::ability::TriggerConstraint;
+
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever an opponent loses life for the first time during each of their turns, put a +1/+1 counter on Valgavoth and draw a card.",
+            "Valgavoth, Harrower of Souls",
+        );
+        let condition = def
+            .condition
+            .clone()
+            .expect("the 'during each of their turns' clause must be lifted into def.condition");
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerTurn),
+            "'for the first time ... each turn' must constrain the trigger to once per turn",
+        );
+
+        let mut state = GameState::new_two_player(7);
+        let controller = PlayerId(0); // Valgavoth's controller
+        let opponent = PlayerId(1);
+        let source = ObjectId(900);
+        let trig_idx = 0;
+
+        // CR 119.3: the triggering player is the player who lost life.
+        let loss_event = GameEvent::LifeChanged {
+            player_id: opponent,
+            amount: -3,
+        };
+
+        // CR 102.1: during the CONTROLLER's turn, an opponent's life loss is not
+        // "during their turn" → the intervening-if fails.
+        state.active_player = controller;
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, Some(source), Some(&loss_event)),
+            "opponent life-loss during the controller's turn must not satisfy 'during each of their turns'",
+        );
+
+        // During the OPPONENT's own turn, their first life loss satisfies it.
+        state.active_player = opponent;
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(source),
+                Some(&loss_event)
+            ),
+            "the opponent's life-loss during their own turn must satisfy the intervening-if",
+        );
+
+        // CR 603.4: OncePerTurn is open until the trigger fires this turn...
+        assert!(
+            check_trigger_constraint(&state, &def, source, trig_idx, controller, &loss_event),
+            "the first life-loss of the turn must satisfy the once-per-turn constraint",
+        );
+        record_trigger_fired(&mut state, def.constraint.as_ref(), source, trig_idx);
+        // ...and closed afterward, so a second life-loss the same turn is gated out.
+        assert!(
+            !check_trigger_constraint(&state, &def, source, trig_idx, controller, &loss_event),
+            "'for the first time' must block a second fire during the same turn",
+        );
+    }
+
     /// Issue #451 — RUNTIME PIPELINE TEST. CR 603.4 + CR 701.21: A who-controls
     /// sacrifice trigger ("Whenever an opponent who controls an artifact
     /// sacrifices a permanent, ...") must parse the relative clause into an

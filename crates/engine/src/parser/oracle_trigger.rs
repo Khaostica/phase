@@ -8329,7 +8329,20 @@ fn attach_event_timing_tail(def: &mut TriggerDefinition, tail: &str) {
     if trimmed.is_empty() {
         return;
     }
-    let Ok((_, kind)) = parse_timing_tail(trimmed) else {
+    // CR 603.4: An optional "for the first time" frequency qualifier preceding
+    // the timing clause limits the trigger to once per turn (Valgavoth's
+    // "loses life for the first time during each of their turns"). The
+    // remaining timing clause is dispatched through `parse_timing_tail` as
+    // usual, so the frequency and turn-ownership axes compose independently.
+    let (timing_text, first_time) =
+        match opt(tag::<_, _, OracleError<'_>>("for the first time ")).parse(trimmed) {
+            Ok((rest, Some(_))) => (rest.trim_start(), true),
+            _ => (trimmed, false),
+        };
+    if first_time {
+        def.constraint.get_or_insert(TriggerConstraint::OncePerTurn);
+    }
+    let Ok((_, kind)) = parse_timing_tail(timing_text) else {
         return;
     };
     let Some(timing) = timing_condition(kind) else {
@@ -8344,10 +8357,11 @@ fn attach_event_timing_tail(def: &mut TriggerDefinition, tail: &str) {
 }
 
 /// Nom combinator for a complete timing-tail clause: matches "each turn",
-/// "in a turn", "during each opponent's turn" (apostrophe-normalized), or
-/// "during their turn". Wrapped in `all_consuming` so it succeeds only when
-/// the clause consumes the entire (already-trimmed) input. Shared by the
-/// nth-spell and nth-draw timing classifiers.
+/// "in a turn", "during each opponent's turn" (apostrophe-normalized), or the
+/// actor's-turn forms "during their turn" / "during each of their turns".
+/// Wrapped in `all_consuming` so it succeeds only when the clause consumes the
+/// entire (already-trimmed) input. Shared by the nth-spell and nth-draw timing
+/// classifiers.
 fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
     all_consuming(alt((
         value(NthEventTimingKind::Unrestricted, tag("each turn")),
@@ -8359,7 +8373,13 @@ fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
                 tag("during each opponent\u{2019}s turn"),
             )),
         ),
-        value(NthEventTimingKind::ActorsTurnOnly, tag("during their turn")),
+        // CR 603.4 + CR 102.1: "during their turn" and the per-turn distributive
+        // "during each of their turns" both restrict the trigger to the acting
+        // player's own turn (Valgavoth, Harrower of Souls).
+        value(
+            NthEventTimingKind::ActorsTurnOnly,
+            alt((tag("during their turn"), tag("during each of their turns"))),
+        ),
     )))
     .parse(i)
 }
@@ -14468,6 +14488,40 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    /// Issue #1367 (cluster #1384). CR 119.3 + CR 603.4 + CR 102.1: Valgavoth,
+    /// Harrower of Souls — "Whenever an opponent loses life for the first time
+    /// during each of their turns, ...". The "for the first time" frequency
+    /// qualifier must become a `OncePerTurn` constraint and the "during each of
+    /// their turns" timing must become a `DuringPlayersTurn { TriggeringPlayer }`
+    /// intervening-if. Previously both were dropped, so the trigger fired on
+    /// every opponent life-loss regardless of whose turn it was.
+    #[test]
+    fn trigger_opponent_loses_life_first_time_during_their_turn() {
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life for the first time during each of their turns, put a +1/+1 counter on Valgavoth and draw a card.",
+            "Valgavoth, Harrower of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerTurn),
+            "\"for the first time ... each turn\" must constrain the trigger to once per turn"
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::TriggeringPlayer
+            }),
+            "\"during each of their turns\" must gate on the life-loser's own turn"
+        );
     }
 
     #[test]
