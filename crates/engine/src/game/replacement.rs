@@ -8287,4 +8287,45 @@ mod tests {
             "LoseMana registry must use the promoted empty_mana_pool_matcher, not the stub"
         );
     }
+
+    /// CR 614.1a + CR 614.13: End-to-end check that Whip of Erebos's parsed
+    /// leave-the-battlefield rider, once installed on a creature, redirects an
+    /// off-battlefield move (here: dying to the graveyard) to exile. Drives the
+    /// real parser output through `replace_event` so the parse and the runtime
+    /// pipeline are pinned together — the reanimated creature is exiled instead
+    /// of "putting it anywhere else."
+    #[test]
+    fn whip_leave_battlefield_rider_redirects_death_to_exile() {
+        // Pull the rider's replacement straight out of the parsed Oracle text.
+        fn find_repl(def: &AbilityDefinition) -> Option<ReplacementDefinition> {
+            if let Effect::AddTargetReplacement { replacement, .. } = &*def.effect {
+                return Some((**replacement).clone());
+            }
+            def.sub_ability.as_deref().and_then(find_repl)
+        }
+
+        let parsed = crate::parser::oracle_effect::parse_effect_chain(
+            "Return target creature card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step. If it would leave the battlefield, exile it instead of putting it anywhere else.",
+            AbilityKind::Activated,
+        );
+        let repl = find_repl(&parsed).expect("parsed rider must carry a replacement");
+
+        // The reanimated creature is on the battlefield carrying the shield.
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        // It would die — a battlefield → graveyard move.
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) = result else {
+            panic!("expected redirected ZoneChange, got {result:?}");
+        };
+        assert_eq!(
+            to,
+            Zone::Exile,
+            "leave-the-battlefield rider must exile instead of going to the graveyard"
+        );
+    }
 }

@@ -712,6 +712,112 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     ))
 }
 
+/// CR 614.1a + CR 614.13: Detect the "if it would leave the battlefield, exile
+/// it instead of putting it anywhere else." rider, returning an
+/// `AddTargetReplacement` def. This is the leave-side sibling of
+/// [`try_parse_die_exile_rider`] — instead of redirecting only the
+/// graveyard-bound (die) zone change, it redirects *any* zone change off the
+/// battlefield to exile.
+///
+/// Covers the reanimation-with-exile-leash class where a one-shot effect
+/// returns a creature and shields it so it never escapes to another zone:
+/// Whip of Erebos ("Return target creature card from your graveyard to the
+/// battlefield. It gains haste. … If it would leave the battlefield, exile it
+/// instead of putting it anywhere else."), and the same rider on similar
+/// temporary-reanimation cards.
+///
+/// The carried replacement uses `valid_card: SelfRef` because once it's pushed
+/// onto the returned creature's `replacement_definitions` (by the
+/// `AddTargetReplacement` resolver), SelfRef resolves against the carrying
+/// object — which IS the creature. Unlike the die-exile rider it is neither
+/// `is_consumed` nor EOT-scoped (CR 614.13: it persists as a continuous
+/// replacement for as long as the object is on the battlefield) and sets no
+/// `destination_zone`, so it matches a move to any zone ("anywhere else").
+fn try_parse_leave_battlefield_exile_rider(
+    lower: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    use crate::types::ability::ReplacementDefinition;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::Zone;
+
+    // Optional leading "if ", then the host anaphor, then " would leave the
+    // battlefield, exile <anaphor> instead of putting it anywhere else".
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
+        tag("that creature"),
+        tag("that planeswalker"),
+        tag("that permanent"),
+        tag("that card"),
+        tag("that token"),
+        tag("~"),
+        tag("it"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would leave the battlefield, exile ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
+        tag("that creature"),
+        tag("that planeswalker"),
+        tag("that permanent"),
+        tag("that card"),
+        tag("them"),
+        tag("~"),
+        tag("it"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead of putting it anywhere else")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // CR 614.6: redirect the host's off-battlefield move to exile. `origin:
+    // Some(Battlefield)` documents the leave-the-battlefield scope; the
+    // redirect destination (Exile) is what `event_modifiers_for_ability`
+    // reads to rewrite the proposed zone change.
+    let exile_effect = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    );
+    // No `destination_zone` (matches any "anywhere else" destination), no
+    // expiry, not consumed — the shield lives with the object and ceases when
+    // the object leaves the battlefield (CR 614.13).
+    let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(exile_effect);
+
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::AddTargetReplacement {
+            replacement: Box::new(repl),
+            target: TargetFilter::Any,
+        },
+    ))
+}
+
 fn parse_optional_period_and_end(input: &str) -> Option<()> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
@@ -12441,6 +12547,45 @@ pub(crate) fn parse_effect_chain_ir(
                 clauses.push(ClauseIr {
                     parsed: parsed_clause(Effect::Unimplemented {
                         name: "die_exile_rider_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 614.1a + CR 614.13: "If it would leave the battlefield, exile it
+        // instead of putting it anywhere else." — the leave-side sibling of the
+        // die-exile rider. Reuses the same `DieExileRider` special clause path:
+        // the carried `AddTargetReplacement` def is appended to the prior
+        // clause's sub-ability chain so it installs on the same object the chain
+        // returned (Whip of Erebos and other temporary-reanimation cards).
+        if let Some(rider_def) =
+            try_parse_leave_battlefield_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
+        {
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "leave_battlefield_exile_rider_placeholder".to_string(),
                         description: None,
                     }),
                     boundary: chunk.boundary_after,
@@ -41418,5 +41563,81 @@ mod snapshot_tests {
             try_parse_named_choice("choose a creature type"),
             Some(ChoiceType::CardType)
         ));
+    }
+
+    /// Recursively search a parsed ability tree for the first
+    /// `Effect::AddTargetReplacement`, returning its `(replacement, target)`.
+    fn find_add_target_replacement(
+        def: &AbilityDefinition,
+    ) -> Option<(&crate::types::ability::ReplacementDefinition, &TargetFilter)> {
+        if let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = &*def.effect
+        {
+            return Some((replacement, target));
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(find_add_target_replacement)
+    }
+
+    /// CR 614.1a + CR 614.13: Whip of Erebos's "If it would leave the
+    /// battlefield, exile it instead of putting it anywhere else." rider must
+    /// lower into an `AddTargetReplacement` carrying a `Moved` replacement that
+    /// redirects any off-battlefield move to exile. Pre-fix this clause was
+    /// swallowed (the replacement node had no body), so the reanimated creature
+    /// escaped to the graveyard/hand instead of being exiled.
+    #[test]
+    fn parse_whip_of_erebos_leave_battlefield_exile_rider() {
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::zones::Zone;
+
+        let def = parse_effect_chain(
+            "Return target creature card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step. If it would leave the battlefield, exile it instead of putting it anywhere else.",
+            AbilityKind::Activated,
+        );
+
+        let (replacement, target) = find_add_target_replacement(&def)
+            .expect("leave-the-battlefield rider must lower to AddTargetReplacement");
+
+        // Binds to the chain's chosen target (the reanimated creature) the same
+        // way the die-exile rider does — `Any` reads `ability.targets`.
+        assert_eq!(*target, TargetFilter::Any);
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+        // "anywhere else" → no destination scope, so it matches every leave.
+        assert_eq!(replacement.destination_zone, None);
+        // Continuous shield (CR 614.13): not one-shot, no end-of-turn expiry.
+        assert!(!replacement.is_consumed);
+        assert_eq!(replacement.expiry, None);
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("rider must carry an exile redirect");
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target: exile_target,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("expected exile ChangeZone, got {:?}", execute.effect);
+        };
+        assert_eq!(*origin, Some(Zone::Battlefield));
+        assert_eq!(*destination, Zone::Exile);
+        assert_eq!(*exile_target, TargetFilter::SelfRef);
+    }
+
+    /// Guard: the rider grammar must not fire on the unrelated stack-rider shape
+    /// ("if that spell would be put into a graveyard, exile it instead").
+    #[test]
+    fn leave_battlefield_rider_does_not_match_spell_graveyard_rider() {
+        assert!(try_parse_leave_battlefield_exile_rider(
+            "if that spell would be put into a graveyard, exile it instead",
+            AbilityKind::Activated,
+        )
+        .is_none());
     }
 }
