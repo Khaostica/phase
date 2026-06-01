@@ -558,6 +558,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 509.1a + CR 509.1b: Cross-mode conjunction "<predicate_1> and can block
+    // an additional creature [each combat]" combines a continuous keyword grant
+    // with an ExtraBlockers permission. A single StaticDefinition can't carry both
+    // modes, so decompose: strip the conjunction, re-parse the grant, emit a
+    // companion ExtraBlockers def inheriting affected + condition. Corpus: Brave the Sands.
+    if let Some(defs) = try_split_and_can_block_additional(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).

@@ -553,7 +553,7 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
     .is_ok()
 }
 
-fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
+pub(crate) fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
     alt((
         map(
             (

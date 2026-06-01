@@ -452,6 +452,72 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
     Some(defs)
 }
 
+/// CR 509.1a + CR 509.1b: Decompose "<predicate_1> and can block an additional
+/// creature [each combat]" (and "N additional creatures" / "any number of
+/// creatures" variants) into the keyword-grant conjunct plus a companion
+/// `ExtraBlockers` static sharing the first conjunct's `affected` + `condition`.
+/// Mirrors `try_split_and_must_attack_block`. CR 611.3a: a static continuous
+/// effect is permanent, so the printed "each combat"/"each turn" cadence stores
+/// no duration — it is consumed and discarded inside the scanned marker.
+pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // `_rest` is intentionally discarded: the printed class ("[group] have
+    // [keyword(s)] and can block an additional N creatures / any number of
+    // creatures [each combat]") has no trailing conjunct after the block clause
+    // (unlike `try_split_and_must_attack_block`, whose tail may carry another
+    // predicate). The optional duration cadence is consumed inside the marker.
+    let (before, count, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        let (i, _) = tag::<_, _, VE>("and can block ").parse(i)?;
+        let (i, count) = parse_extra_blockers_count(i)?;
+        let (i, _) = parse_block_static_duration(i)?;
+        Ok((i, count))
+    })?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let template = &defs[0];
+    let affected = template.affected.clone()?;
+    let condition = template.condition.clone();
+
+    let mut companion = StaticDefinition::new(StaticMode::ExtraBlockers { count })
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
+/// CR 611.3a: Static continuous effects are permanent; the printed
+/// "each combat"/"each turn"/"this combat"/"this turn" cadence is descriptive
+/// and stores no duration. Consume and discard it.
+fn parse_block_static_duration(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        opt(alt((
+            tag::<_, _, OracleError<'_>>(" each combat"),
+            tag(" each turn"),
+            tag(" this combat"),
+            tag(" this turn"),
+        ))),
+    )
+    .parse(input)
+}
+
 /// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
 /// Handles "colorless", "multicolored", "snow", and "snow and [Subtype]" patterns.
 /// Returns a fully constructed `TargetFilter` with the appropriate properties.

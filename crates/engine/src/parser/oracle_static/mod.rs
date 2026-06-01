@@ -17,7 +17,7 @@ mod prelude {
 
     pub(super) use super::super::oracle_cost::parse_oracle_cost;
     pub(super) use super::super::oracle_effect::subject::{
-        parse_restriction_modes, static_mode_needs_grant_propagation,
+        parse_extra_blockers_count, parse_restriction_modes, static_mode_needs_grant_propagation,
     };
     pub(super) use super::super::oracle_effect::{parse_effect_chain, strip_trailing_duration};
     pub(super) use super::super::oracle_ir::context::ParseContext;
@@ -97,7 +97,7 @@ mod support {
         parse_compound_subject_rule_static, parse_property_descriptor,
         parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
-        try_split_and_must_attack_block,
+        try_split_and_can_block_additional, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{

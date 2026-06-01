@@ -3660,6 +3660,97 @@ fn static_can_block_any_number() {
 }
 
 #[test]
+fn static_keyword_grant_and_can_block_additional_emits_both_defs() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi(
+        "Creatures you control have vigilance and can block an additional creature each combat.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected two StaticDefinitions, got {defs:?}"
+    );
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance,
+        }));
+    assert_eq!(defs[1].mode, StaticMode::ExtraBlockers { count: Some(1) });
+    // Companion shares the keyword-grant conjunct's affected filter.
+    assert_eq!(defs[1].affected, defs[0].affected);
+    assert!(defs[0].affected.is_some());
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        )),
+        "companion ExtraBlockers must affect creatures you control"
+    );
+    let full =
+        "Creatures you control have vigilance and can block an additional creature each combat.";
+    assert_eq!(defs[0].description.as_deref(), Some(full));
+    assert_eq!(defs[1].description.as_deref(), Some(full));
+}
+
+#[test]
+fn static_keyword_grant_and_can_block_two_additional_emits_both_defs() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi(
+        "Creatures you control have flying and can block two additional creatures.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected two StaticDefinitions, got {defs:?}"
+    );
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }));
+    assert_eq!(defs[1].mode, StaticMode::ExtraBlockers { count: Some(2) });
+    assert_eq!(defs[1].affected, defs[0].affected);
+}
+
+#[test]
+fn static_keyword_grant_and_can_block_any_number_emits_both_defs() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi(
+        "Creatures you control have reach and can block any number of creatures.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected two StaticDefinitions, got {defs:?}"
+    );
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Reach,
+        }));
+    assert_eq!(defs[1].mode, StaticMode::ExtraBlockers { count: None });
+    assert_eq!(defs[1].affected, defs[0].affected);
+}
+
+#[test]
+fn parse_extra_blockers_count_routes_article_to_one() {
+    use super::super::oracle_effect::subject::parse_extra_blockers_count;
+
+    assert_eq!(
+        parse_extra_blockers_count("an additional creature"),
+        Ok(("", Some(1)))
+    );
+    let (_, count) = parse_extra_blockers_count("a additional creature").unwrap();
+    assert_eq!(count, Some(1));
+}
+
+#[test]
 fn static_play_two_additional_lands() {
     // "play two additional lands" — not handled by the subject-predicate parser
     let def =
